@@ -308,6 +308,30 @@ Usage:
                 is_last=True,
             )
 
+        # _ReadParams publishes these bounds and the toolkit only repairs
+        # JSON types, so an out-of-range offset/limit must be an error here
+        # rather than a mis-sliced success.
+        props = self.input_schema["properties"]
+        offset_min = props["offset"]["minimum"]
+        limit_min = props["limit"]["minimum"]
+        limit_max = props["limit"]["maximum"]
+        bounds_error: str | None = None
+        if offset < offset_min:
+            bounds_error = (
+                f"Error: offset must be >= {offset_min}, got: {offset}"
+            )
+        elif limit < limit_min or limit > limit_max:
+            bounds_error = (
+                f"Error: limit must be between {limit_min} and "
+                f"{limit_max}, got: {limit}"
+            )
+        if bounds_error is not None:
+            return ToolChunk(
+                content=[TextBlock(text=bounds_error)],
+                state=ToolResultState.ERROR,
+                is_last=True,
+            )
+
         # Determine file type by extension. splitext on the basename works
         # for both posix and windows style backend paths.
         ext = os.path.splitext(self._backend.basename(file_path))[1].lower()
