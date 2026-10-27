@@ -42,6 +42,11 @@ _IMAGE_EXTENSIONS: dict[str, str] = {
 _PDF_MAX_PAGES_WITHOUT_RANGE = 10
 _PDF_MAX_PAGES_PER_READ = 20
 
+# Plain-text bounds published by ``_ReadParams``. ``offset`` is 1-based.
+_READ_OFFSET_MIN = 1
+_READ_LIMIT_MIN = 1
+_READ_LIMIT_MAX = 2000
+
 # Image types accepted by the Anthropic, OpenAI, Gemini and DashScope APIs.
 _DEFAULT_MODEL_INPUT_TYPES = [
     "image/png",
@@ -58,17 +63,19 @@ class _ReadParams(ParamsBase):
         description="The absolute path to the file to read.",
     )
     offset: int = Field(
-        default=1,
-        ge=1,
+        default=_READ_OFFSET_MIN,
+        ge=_READ_OFFSET_MIN,
         description="Optional 1-based line number to start reading from. "
-        "Only applies to plain text files (default: 1)",
+        "Only applies to plain text files "
+        f"(default: {_READ_OFFSET_MIN})",
     )
     limit: int = Field(
-        default=2000,
-        ge=1,
-        le=2000,
+        default=_READ_LIMIT_MAX,
+        ge=_READ_LIMIT_MIN,
+        le=_READ_LIMIT_MAX,
         description="Optional maximum number of lines to read. Only applies "
-        "to plain text files (default: 2000, max: 2000)",
+        "to plain text files "
+        f"(default: {_READ_LIMIT_MAX}, max: {_READ_LIMIT_MAX})",
     )
     pages: str | None = Field(
         default=None,
@@ -259,8 +266,8 @@ Usage:
     async def call(  # type: ignore[override]
         self,
         file_path: str,
-        offset: int = 1,
-        limit: int = 2000,
+        offset: int = _READ_OFFSET_MIN,
+        limit: int = _READ_LIMIT_MAX,
         pages: str | None = None,
         _agent_state: AgentState | None = None,
     ) -> ToolChunk:
@@ -270,7 +277,35 @@ Usage:
         - PDF: text extraction via RAG parser
         - Image: base64-encoded DataBlock
         - Other: line-numbered text (TextBlock)
+
+        ``offset`` and ``limit`` outside the ``_ReadParams`` bounds return
+        an error chunk naming the argument.
         """
+        # Toolkit.call_tool repairs types only, so enforce the bounds
+        # published on ``_ReadParams`` here. A too-small offset would
+        # otherwise wrap and number lines below 1.
+        if offset < _READ_OFFSET_MIN:
+            return ToolChunk(
+                content=[
+                    TextBlock(
+                        text=f"Error: offset must be >= {_READ_OFFSET_MIN}, "
+                        f"got: {offset}",
+                    ),
+                ],
+                state=ToolResultState.ERROR,
+                is_last=True,
+            )
+        if limit < _READ_LIMIT_MIN or limit > _READ_LIMIT_MAX:
+            return ToolChunk(
+                content=[
+                    TextBlock(
+                        text=f"Error: limit must be >= {_READ_LIMIT_MIN} "
+                        f"and <= {_READ_LIMIT_MAX}, got: {limit}",
+                    ),
+                ],
+                state=ToolResultState.ERROR,
+                is_last=True,
+            )
 
         # Validate file_path is absolute
         if not self._backend.isabs(file_path):

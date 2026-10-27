@@ -2,6 +2,7 @@
 """Read tool test case."""
 import base64
 import io
+import json
 import os
 import tempfile
 import uuid
@@ -9,13 +10,14 @@ from unittest.async_case import IsolatedAsyncioTestCase
 from unittest.mock import patch
 from utils import AnyString
 
-from agentscope.tool import ToolChunk, Read
+from agentscope.message import TextBlock, ToolCallBlock
 from agentscope.permission import (
     PermissionContext,
     PermissionBehavior,
     PermissionRule,
 )
-from agentscope.message import TextBlock
+from agentscope.state import AgentState
+from agentscope.tool import Read, ToolChunk, Toolkit, ToolResponse
 
 
 # pylint: disable=too-many-public-methods
@@ -720,3 +722,74 @@ class ReadToolTest(IsolatedAsyncioTestCase):
                 "id": AnyString(),
             },
         )
+
+    async def _read_through_toolkit(
+        self,
+        file_path: str,
+        **arguments: int,
+    ) -> ToolResponse:
+        """Call Read through ``Toolkit.call_tool``, as an agent would."""
+        response = None
+        async for result in Toolkit(tools=[self.read_tool]).call_tool(
+            ToolCallBlock(
+                id="read",
+                name="Read",
+                input=json.dumps({"file_path": file_path, **arguments}),
+            ),
+            AgentState(),
+        ):
+            if isinstance(result, ToolResponse):
+                response = result
+        if not isinstance(response, ToolResponse):
+            raise AssertionError("Read produced no ToolResponse")
+        return response
+
+    async def test_read_never_numbers_lines_below_one(self) -> None:
+        """offset below 1 must not succeed with a line numbered below 1."""
+        for offset in (0, -1):
+            response = await self._read_through_toolkit(
+                self.temp_file.name,
+                offset=offset,
+            )
+            line_numbers = [
+                int(line.split("\t")[0].strip())
+                for line in response.content[0].text.splitlines()
+                if "\t" in line
+            ]
+            self.assertTrue(
+                response.state != "success"
+                or all(number >= 1 for number in line_numbers),
+                f"state={response.state}, line numbers={line_numbers}",
+            )
+            if response.state == "error":
+                self.assertIn("offset", response.content[0].text)
+
+    async def test_read_honours_the_documented_line_cap(self) -> None:
+        """limit outside 1..2000 must not return more than 2000 lines."""
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            delete=False,
+            suffix=".txt",
+        ) as handle:
+            handle.write("".join(f"row {i}\n" for i in range(1, 5001)))
+        self.addCleanup(os.unlink, handle.name)
+
+        response = await self._read_through_toolkit(handle.name, limit=99999)
+        if response.state == "error":
+            self.assertIn("limit", response.content[0].text)
+        else:
+            self.assertLessEqual(
+                len(response.content[0].text.splitlines()),
+                2000,
+            )
+
+        below_min = await self._read_through_toolkit(
+            self.temp_file.name,
+            limit=0,
+        )
+        self.assertEqual(below_min.state, "error")
+        self.assertIn("limit", below_min.content[0].text)
+
+        capped = await self._read_through_toolkit(handle.name, limit=2000)
+        self.assertEqual(capped.state, "success")
+        self.assertEqual(len(capped.content[0].text.splitlines()), 2000)
