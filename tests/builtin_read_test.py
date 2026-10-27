@@ -178,6 +178,57 @@ class ReadToolTest(IsolatedAsyncioTestCase):
         self.assertIn("Line 3", content)
         self.assertNotIn("Line 4", content)
 
+    async def test_read_rejects_offset_below_one(self) -> None:
+        """Offset below 1 is an error, not a wrap to the end of the file."""
+        for offset in (0, -1):
+            with self.subTest(offset=offset):
+                chunk = await self.read_tool(
+                    file_path=self.temp_file.name,
+                    offset=offset,
+                )
+                self.assertEqual(chunk.state, "error")
+                self.assertTrue(chunk.is_last)
+                self.assertEqual(
+                    chunk.content[0].text,
+                    "Error: offset must be greater than or equal to 1, "
+                    f"got: {offset}",
+                )
+                self.assertNotIn("Line", chunk.content[0].text)
+
+    async def test_read_rejects_limit_outside_bounds(self) -> None:
+        """Limit outside 1..2000 is an error, not a full-file read."""
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            delete=False,
+            suffix=".txt",
+        ) as handle:
+            handle.write("".join(f"row {i}\n" for i in range(1, 5001)))
+        self.addCleanup(os.unlink, handle.name)
+
+        for limit in (0, -1, 2001, 99999):
+            with self.subTest(limit=limit):
+                chunk = await self.read_tool(
+                    file_path=handle.name,
+                    limit=limit,
+                )
+                self.assertEqual(chunk.state, "error")
+                self.assertTrue(chunk.is_last)
+                self.assertEqual(
+                    chunk.content[0].text,
+                    "Error: limit must be between 1 and 2000, "
+                    f"got: {limit}",
+                )
+                self.assertNotIn("row ", chunk.content[0].text)
+
+        # The documented maximum is still a successful partial read.
+        chunk = await self.read_tool(file_path=handle.name, limit=2000)
+        self.assertEqual(chunk.state, "running")
+        lines = chunk.content[0].text.splitlines()
+        self.assertEqual(len(lines), 2000)
+        self.assertIn("row 1", lines[0])
+        self.assertIn("row 2000", lines[-1])
+        self.assertNotIn("row 2001", chunk.content[0].text)
+
     async def test_read_nonexistent_file(self) -> None:
         """Test reading a non-existent file."""
         missing_path = os.path.join(
